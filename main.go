@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/fatih/color"
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,8 @@ type Stage struct {
 	Command  string   `yaml:"command"`
 	Args     []string `yaml:"args"`
 	Parallel bool     `yaml:"parallel"`
+	Timeout  string   `yaml:"timeout,omitempty"`
+	Retry    int      `yaml:"retry,omitempty"`
 }
 
 var (
@@ -105,6 +108,18 @@ func validateConfig(config PipelineConfig) error {
 		if strings.TrimSpace(stage.Command) == "" {
 			return fmt.Errorf("stage %q is missing command", stage.Name)
 		}
+		if stage.Retry < 0 {
+			return fmt.Errorf("stage %q has invalid retry value %d; must be >= 0", stage.Name, stage.Retry)
+		}
+		if stage.Timeout != "" {
+			timeout, err := time.ParseDuration(stage.Timeout)
+			if err != nil {
+				return fmt.Errorf("stage %q has invalid timeout %q: %w", stage.Name, stage.Timeout, err)
+			}
+			if timeout <= 0 {
+				return fmt.Errorf("stage %q has non-positive timeout %q", stage.Name, stage.Timeout)
+			}
+		}
 		if _, exists := names[stage.Name]; exists {
 			return fmt.Errorf("duplicate stage name %q", stage.Name)
 		}
@@ -139,7 +154,7 @@ func runPipeline(ctx context.Context, stages []Stage) error {
 				return err
 			}
 
-			if err := executeStage(ctx, stage); err != nil {
+			if err := executeStageWithRetry(ctx, stage); err != nil {
 				return err
 			}
 		}
@@ -178,7 +193,7 @@ func runParallelBatch(parentCtx context.Context, stages []Stage) error {
 				}
 			}()
 
-			err := executeStage(ctx, s)
+			err := executeStageWithRetry(ctx, s)
 			if err != nil {
 				cancel()
 			}
@@ -210,18 +225,94 @@ func runParallelBatch(parentCtx context.Context, stages []Stage) error {
 	return firstErr
 }
 
-// executeStage handles the actual system calls.
-func executeStage(ctx context.Context, s Stage) error {
-	info.Printf("\n▶️  RUNNING: %s\n", s.Name)
-	fmt.Printf("   Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+func executeStageWithRetry(ctx context.Context, s Stage) error {
+	attempts := s.Retry + 1
+	var lastErr error
 
-	cmd := exec.CommandContext(ctx, s.Command, s.Args...)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err := executeStage(ctx, s, attempt, attempts)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		var stageErr *stageError
+		if errors.As(err, &stageErr) && stageErr.Cancelled {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		if attempt == attempts {
+			break
+		}
+
+		info.Printf("🔁 RETRYING: %s (attempt %d/%d)\n", s.Name, attempt+1, attempts)
+		if err := sleepWithContext(ctx, time.Second); err != nil {
+			return &stageError{
+				Stage:     s.Name,
+				Command:   s.Command,
+				Err:       err,
+				Cancelled: true,
+			}
+		}
+	}
+
+	return lastErr
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// executeStage handles one stage attempt.
+func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int) error {
+	runLabel := s.Name
+	if totalAttempts > 1 {
+		runLabel = fmt.Sprintf("%s (attempt %d/%d)", s.Name, attempt, totalAttempts)
+	}
+
+	info.Printf("\n▶️  RUNNING: %s\n", runLabel)
+	fmt.Printf("   Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+	if s.Timeout != "" {
+		fmt.Printf("   Timeout: %s\n", s.Timeout)
+	}
+
+	runCtx := ctx
+	cancel := func() {}
+	if s.Timeout != "" {
+		timeout, err := time.ParseDuration(s.Timeout)
+		if err != nil {
+			return &stageError{Stage: s.Name, Command: s.Command, Err: err}
+		}
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, s.Command, s.Args...)
 
 	// Stream output to the main terminal
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return &stageError{
+				Stage:   s.Name,
+				Command: s.Command,
+				Err:     fmt.Errorf("timed out after %s", s.Timeout),
+			}
+		}
+
 		if ctx.Err() != nil {
 			return &stageError{
 				Stage:     s.Name,
