@@ -13,7 +13,7 @@ func main() {
 	flag.Parse()
 
 	if err := pipeline.Run(*configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR | %v\n", err)
 		os.Exit(1)
 	}
 }

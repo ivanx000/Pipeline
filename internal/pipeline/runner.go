@@ -34,14 +34,14 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 
-	info.Printf("STARTING PIPELINE: %s\n", config.Project)
+	info.Printf("INFO  | Starting pipeline: %s\n", config.Project)
 	fmt.Println(strings.Repeat("=", 40))
 	if err := runPipeline(ctx, config.Stages); err != nil {
 		return err
 	}
 
 	fmt.Println(strings.Repeat("=", 40))
-	success.Println("PIPELINE SUCCESS: All stages passed.")
+	success.Println("INFO  | Pipeline completed successfully.")
 	return nil
 }
 
@@ -164,7 +164,7 @@ func executeStageWithRetry(ctx context.Context, s Stage) error {
 			break
 		}
 
-		info.Printf("RETRYING: %s (attempt %d/%d)\n", s.Name, attempt+1, attempts)
+		info.Printf("WARN  | Retrying stage %q (attempt %d/%d)\n", s.Name, attempt+1, attempts)
 		if err := sleepWithContext(ctx, time.Second); err != nil {
 			return &stageError{
 				Stage:     s.Name,
@@ -197,10 +197,10 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int) 
 		runLabel = fmt.Sprintf("%s (attempt %d/%d)", s.Name, attempt, totalAttempts)
 	}
 
-	info.Printf("\nRUNNING: %s\n", runLabel)
-	fmt.Printf("   Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+	info.Printf("\nINFO  | Running stage: %s\n", runLabel)
+	fmt.Printf("INFO  | Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
 	if s.Timeout != "" {
-		fmt.Printf("   Timeout: %s\n", s.Timeout)
+		fmt.Printf("INFO  | Timeout: %s\n", s.Timeout)
 	}
 
 	runCtx := ctx
@@ -244,6 +244,6 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int) 
 		}
 	}
 
-	success.Printf("COMPLETED: %s\n", s.Name)
+	success.Printf("INFO  | Completed stage: %s\n", s.Name)
 	return nil
 }
