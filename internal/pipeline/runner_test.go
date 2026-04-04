@@ -109,7 +109,7 @@ func TestExecuteStageWithRetrySucceedsOnRetry(t *testing.T) {
 		Command: "sh",
 		Args:    []string{"-c", script},
 		Retry:   1,
-	})
+	}, Options{})
 	if err != nil {
 		t.Fatalf("executeStageWithRetry() unexpected error: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestExecuteStageWithRetryTimesOut(t *testing.T) {
 		Args:    []string{"-c", "sleep 1"},
 		Timeout: "100ms",
 		Retry:   0,
-	})
+	}, Options{})
 	if err == nil {
 		t.Fatal("executeStageWithRetry() expected timeout error, got nil")
 	}
@@ -152,7 +152,7 @@ func TestRunPipelineStopsBeforeSequentialAfterParallelFailure(t *testing.T) {
 		{Name: "sequential-should-not-run", Command: "sh", Args: []string{"-c", fmt.Sprintf("touch %q", marker)}},
 	}
 
-	err := runPipeline(context.Background(), stages)
+	err := runPipeline(context.Background(), stages, Options{})
 	if err == nil {
 		t.Fatal("runPipeline() expected error, got nil")
 	}

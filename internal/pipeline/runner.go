@@ -17,35 +17,50 @@ import (
 
 var (
 	info    = color.New(color.FgCyan).Add(color.Bold)
+	warn    = color.New(color.FgYellow).Add(color.Bold)
 	success = color.New(color.FgGreen).Add(color.Bold)
 )
 
+// Options controls runtime behavior for pipeline execution.
+type Options struct {
+	Quiet bool
+}
+
 // Run executes the pipeline from the provided config path.
 func Run(configPath string) error {
+	return RunWithOptions(configPath, Options{})
+}
+
+// RunWithOptions executes the pipeline from the provided config path using runtime options.
+func RunWithOptions(configPath string, options Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return run(ctx, configPath)
+	return run(ctx, configPath, options)
 }
 
-func run(ctx context.Context, configPath string) error {
+func run(ctx context.Context, configPath string, options Options) error {
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
 
-	info.Printf("INFO  | Starting pipeline: %s\n", config.Project)
-	fmt.Println(strings.Repeat("=", 40))
-	if err := runPipeline(ctx, config.Stages); err != nil {
+	printInfo(options, "INFO  | Starting pipeline: %s\n", config.Project)
+	if !options.Quiet {
+		fmt.Println(strings.Repeat("=", 40))
+	}
+	if err := runPipeline(ctx, config.Stages, options); err != nil {
 		return err
 	}
 
-	fmt.Println(strings.Repeat("=", 40))
-	success.Println("INFO  | Pipeline completed successfully.")
+	if !options.Quiet {
+		fmt.Println(strings.Repeat("=", 40))
+	}
+	printSuccess(options, "INFO  | Pipeline completed successfully.\n")
 	return nil
 }
 
-func runPipeline(ctx context.Context, stages []Stage) error {
+func runPipeline(ctx context.Context, stages []Stage, options Options) error {
 	var parallelBatch []Stage
 
 	flushParallelBatch := func() error {
@@ -53,7 +68,7 @@ func runPipeline(ctx context.Context, stages []Stage) error {
 			return nil
 		}
 
-		err := runParallelBatch(ctx, parallelBatch)
+		err := runParallelBatch(ctx, parallelBatch, options)
 		parallelBatch = nil
 		return err
 	}
@@ -70,7 +85,7 @@ func runPipeline(ctx context.Context, stages []Stage) error {
 				return err
 			}
 
-			if err := executeStageWithRetry(ctx, stage); err != nil {
+			if err := executeStageWithRetry(ctx, stage, options); err != nil {
 				return err
 			}
 		}
@@ -83,7 +98,7 @@ func runPipeline(ctx context.Context, stages []Stage) error {
 	return nil
 }
 
-func runParallelBatch(parentCtx context.Context, stages []Stage) error {
+func runParallelBatch(parentCtx context.Context, stages []Stage, options Options) error {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -109,7 +124,7 @@ func runParallelBatch(parentCtx context.Context, stages []Stage) error {
 				}
 			}()
 
-			err := executeStageWithRetry(ctx, s)
+			err := executeStageWithRetry(ctx, s, options)
 			if err != nil {
 				cancel()
 			}
@@ -141,12 +156,12 @@ func runParallelBatch(parentCtx context.Context, stages []Stage) error {
 	return firstErr
 }
 
-func executeStageWithRetry(ctx context.Context, s Stage) error {
+func executeStageWithRetry(ctx context.Context, s Stage, options Options) error {
 	attempts := s.Retry + 1
 	var lastErr error
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err := executeStage(ctx, s, attempt, attempts)
+		err := executeStage(ctx, s, attempt, attempts, options)
 		if err == nil {
 			return nil
 		}
@@ -164,7 +179,7 @@ func executeStageWithRetry(ctx context.Context, s Stage) error {
 			break
 		}
 
-		info.Printf("WARN  | Retrying stage %q (attempt %d/%d)\n", s.Name, attempt+1, attempts)
+		warn.Printf("WARN  | Retrying stage %q (attempt %d/%d)\n", s.Name, attempt+1, attempts)
 		if err := sleepWithContext(ctx, time.Second); err != nil {
 			return &stageError{
 				Stage:     s.Name,
@@ -191,16 +206,16 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 // executeStage handles one stage attempt.
-func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int) error {
+func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, options Options) error {
 	runLabel := s.Name
 	if totalAttempts > 1 {
 		runLabel = fmt.Sprintf("%s (attempt %d/%d)", s.Name, attempt, totalAttempts)
 	}
 
-	info.Printf("\nINFO  | Running stage: %s\n", runLabel)
-	fmt.Printf("INFO  | Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+	printInfo(options, "\nINFO  | Running stage: %s\n", runLabel)
+	printInfo(options, "INFO  | Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
 	if s.Timeout != "" {
-		fmt.Printf("INFO  | Timeout: %s\n", s.Timeout)
+		printInfo(options, "INFO  | Timeout: %s\n", s.Timeout)
 	}
 
 	runCtx := ctx
@@ -244,6 +259,20 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int) 
 		}
 	}
 
-	success.Printf("INFO  | Completed stage: %s\n", s.Name)
+	printSuccess(options, "INFO  | Completed stage: %s\n", s.Name)
 	return nil
+}
+
+func printInfo(options Options, format string, args ...any) {
+	if options.Quiet {
+		return
+	}
+	info.Printf(format, args...)
+}
+
+func printSuccess(options Options, format string, args ...any) {
+	if options.Quiet {
+		return
+	}
+	success.Printf(format, args...)
 }
