@@ -1,0 +1,11 @@
+project: "My-Go-Pipeline"
+stages:
+  - name: "Linting"
+    command: "go"
+    args: ["vet", "./..."]
+  - name: "Unit Tests"
+    command: "go"
+    args: ["test", "-v", "./..."]
+  - name: "Build Binary"
+    command: "go"
+    args: ["build", "-o", "gopipe", "."]

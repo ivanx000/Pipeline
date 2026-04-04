@@ -1,0 +1,7 @@
+# Binaries
+gopipe
+*.exe
+*.bin
+
+# OS generated files
+.DS_Store
