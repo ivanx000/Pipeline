@@ -3,9 +3,12 @@ stages:
   - name: "Linting"
     command: "go"
     args: ["vet", "./..."]
-  - name: "Unit Tests"
+    parallel: true
+  - name: "Security Check"
     command: "go"
-    args: ["test", "-v", "./..."]
+    args: ["test", "-race", "-v", "./..."]
+    parallel: true
   - name: "Build Binary"
     command: "go"
     args: ["build", "-o", "gopipe", "."]
+    parallel: false
