@@ -5,36 +5,41 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/fatih/color" // Import the new library
 )
 
 func main() {
-	// 1. Check if the user provided a command to run
+	// Create reusable color "formatters"
+	info := color.New(color.FgCyan).Add(color.Bold)
+	success := color.New(color.FgGreen).Add(color.Bold)
+	failure := color.New(color.FgRed).Add(color.Bold)
+
 	if len(os.Args) < 2 {
-		fmt.Println("❌ Usage: go run main.go <command>")
+		failure.Println("❌ Usage: go run main.go <command>")
 		os.Exit(1)
 	}
 
-	// 2. Join the arguments into a single string (e.g., "echo hello")
 	commandName := os.Args[1]
 	args := os.Args[2:]
 
-	fmt.Printf("🚀 Executing: %s %s\n", commandName, strings.Join(args, " "))
-	fmt.Println("-----------------------------------------")
+	// Use the Info color for the header
+	info.Printf("🚀 STAGE START: %s %s\n", commandName, strings.Join(args, " "))
+	fmt.Println(strings.Repeat("-", 40))
 
-	// 3. Prepare the system command
 	cmd := exec.Command(commandName, args...)
-
-	// 4. Connect the command's output directly to your terminal
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// 5. Run it!
 	err := cmd.Run()
+
+	fmt.Println(strings.Repeat("-", 40))
+
 	if err != nil {
-		fmt.Printf("\n❌ Stage Failed: %v\n", err)
+		failure.Printf("❌ STAGE FAILED: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("-----------------------------------------")
-	fmt.Println("✅ Stage Completed Successfully!")
+	// Use the Success color for the footer
+	success.Println("✅ STAGE COMPLETED SUCCESSFULLY!")
 }
