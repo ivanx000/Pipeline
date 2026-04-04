@@ -1,4 +1,4 @@
-package main
+package pipeline
 
 import (
 	"context"
@@ -21,59 +21,59 @@ func requirePOSIXShell(t *testing.T) {
 func TestValidateConfig(t *testing.T) {
 	tests := []struct {
 		name    string
-		config  PipelineConfig
+		config  Config
 		wantErr string
 	}{
 		{
 			name: "valid config",
-			config: PipelineConfig{
+			config: Config{
 				Project: "ok",
 				Stages:  []Stage{{Name: "build", Command: "go", Args: []string{"version"}}},
 			},
 		},
 		{
 			name:    "no stages",
-			config:  PipelineConfig{Project: "empty"},
+			config:  Config{Project: "empty"},
 			wantErr: "pipeline has no stages",
 		},
 		{
 			name: "missing stage name",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Command: "echo"}},
 			},
 			wantErr: "missing name",
 		},
 		{
 			name: "missing command",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Name: "lint"}},
 			},
 			wantErr: "missing command",
 		},
 		{
 			name: "duplicate stage name",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Name: "lint", Command: "echo"}, {Name: "lint", Command: "echo"}},
 			},
 			wantErr: "duplicate stage name",
 		},
 		{
 			name: "negative retry",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Name: "lint", Command: "echo", Retry: -1}},
 			},
 			wantErr: "invalid retry value",
 		},
 		{
 			name: "invalid timeout format",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Name: "lint", Command: "echo", Timeout: "soon"}},
 			},
 			wantErr: "invalid timeout",
 		},
 		{
 			name: "non positive timeout",
-			config: PipelineConfig{
+			config: Config{
 				Stages: []Stage{{Name: "lint", Command: "echo", Timeout: "0s"}},
 			},
 			wantErr: "non-positive timeout",
@@ -98,7 +98,7 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-func TestExecuteStageWithRetry_SucceedsOnRetry(t *testing.T) {
+func TestExecuteStageWithRetrySucceedsOnRetry(t *testing.T) {
 	requirePOSIXShell(t)
 
 	flagFile := filepath.Join(t.TempDir(), "retry-once.flag")
@@ -119,7 +119,7 @@ func TestExecuteStageWithRetry_SucceedsOnRetry(t *testing.T) {
 	}
 }
 
-func TestExecuteStageWithRetry_TimesOut(t *testing.T) {
+func TestExecuteStageWithRetryTimesOut(t *testing.T) {
 	requirePOSIXShell(t)
 
 	err := executeStageWithRetry(context.Background(), Stage{
@@ -142,7 +142,7 @@ func TestExecuteStageWithRetry_TimesOut(t *testing.T) {
 	}
 }
 
-func TestRunPipeline_StopsBeforeSequentialAfterParallelFailure(t *testing.T) {
+func TestRunPipelineStopsBeforeSequentialAfterParallelFailure(t *testing.T) {
 	requirePOSIXShell(t)
 
 	marker := filepath.Join(t.TempDir(), "sequential-ran.flag")
