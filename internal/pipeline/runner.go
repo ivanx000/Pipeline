@@ -31,6 +31,8 @@ type Options struct {
 	Only            []string
 	SummaryJSONPath string
 	MaxParallel     int
+	DryRun          bool
+	SkipPreflight   bool
 }
 
 // StageSummary stores one stage execution result for JSON reporting.
@@ -128,6 +130,12 @@ func run(ctx context.Context, configPath string, options Options) error {
 		return err
 	}
 
+	if !options.SkipPreflight {
+		if err := preflightCommands(stages); err != nil {
+			return err
+		}
+	}
+
 	maxParallel := config.MaxParallel
 	if options.MaxParallel > 0 {
 		maxParallel = options.MaxParallel
@@ -144,6 +152,9 @@ func run(ctx context.Context, configPath string, options Options) error {
 	}()
 
 	printInfo(options, "INFO  | Starting pipeline: %s\n", config.Project)
+	if options.DryRun {
+		printInfo(options, "INFO  | Dry-run mode enabled (commands will not execute).\n")
+	}
 	if maxParallel > 0 {
 		printInfo(options, "INFO  | Max parallel stages: %d\n", maxParallel)
 	}
@@ -382,6 +393,12 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, 
 		cmd.Env = mergedEnv(os.Environ(), s.Env)
 	}
 
+	if options.DryRun {
+		printInfo(options, "INFO  | [DRY-RUN] Skipping command execution for stage: %s\n", s.Name)
+		printSuccess(options, "INFO  | Completed stage: %s\n", s.Name)
+		return nil
+	}
+
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -524,6 +541,61 @@ func writeSummaryJSON(path string, summary RunSummary) error {
 		return fmt.Errorf("write summary file %q: %w", path, err)
 	}
 	return nil
+}
+
+func preflightCommands(stages []Stage) error {
+	lookupErrByCommand := make(map[string]error, len(stages))
+	missingByCommand := make(map[string][]string)
+
+	for _, stage := range stages {
+		command := strings.TrimSpace(stage.Command)
+		if command == "" {
+			continue
+		}
+
+		lookupErr, checked := lookupErrByCommand[command]
+		if !checked {
+			_, lookupErr = exec.LookPath(command)
+			lookupErrByCommand[command] = lookupErr
+		}
+
+		if lookupErr != nil {
+			missingByCommand[command] = append(missingByCommand[command], stage.Name)
+		}
+	}
+
+	if len(missingByCommand) == 0 {
+		return nil
+	}
+
+	commands := make([]string, 0, len(missingByCommand))
+	for command := range missingByCommand {
+		commands = append(commands, command)
+	}
+	sort.Strings(commands)
+
+	var b strings.Builder
+	b.WriteString("preflight failed: missing required command(s):")
+	for _, command := range commands {
+		stageNames := dedupeAndSort(missingByCommand[command])
+		b.WriteString(fmt.Sprintf("\n- %s (stages: %s)", command, strings.Join(stageNames, ", ")))
+	}
+
+	return errors.New(b.String())
+}
+
+func dedupeAndSort(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func printInfo(options Options, format string, args ...any) {

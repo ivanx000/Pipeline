@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -255,5 +256,153 @@ func TestRunPipelineWithMaxParallelOne(t *testing.T) {
 
 	if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
 		t.Fatalf("expected max_parallel=1 to serialize parallel stages, elapsed=%v", elapsed)
+	}
+}
+
+func TestExecuteStageWithRetryDryRunSkipsCommandExecution(t *testing.T) {
+	requirePOSIXShell(t)
+
+	marker := filepath.Join(t.TempDir(), "dry-run.marker")
+	_, err := executeStageWithRetry(context.Background(), Stage{
+		Name:    "dry-run-skip",
+		Command: "sh",
+		Args:    []string{"-c", fmt.Sprintf("touch %q", marker)},
+	}, Options{DryRun: true, Quiet: true})
+	if err != nil {
+		t.Fatalf("executeStageWithRetry() unexpected error in dry-run: %v", err)
+	}
+
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected marker not to be created in dry-run; statErr=%v", statErr)
+	}
+}
+
+func TestRunWritesSummaryJSONInDryRun(t *testing.T) {
+	requirePOSIXShell(t)
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "pipeline.yaml")
+	summaryPath := filepath.Join(tempDir, "summary.json")
+	marker := filepath.Join(tempDir, "should-not-exist.marker")
+
+	config := fmt.Sprintf(`project: "dry-run-summary"
+stages:
+  - name: "touch-skip"
+    command: "sh"
+    args: ["-c", "touch %s"]
+`, marker)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	err := run(context.Background(), configPath, Options{
+		Quiet:           true,
+		DryRun:          true,
+		SummaryJSONPath: summaryPath,
+	})
+	if err != nil {
+		t.Fatalf("run() unexpected error in dry-run: %v", err)
+	}
+
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected marker not to be created in dry-run; statErr=%v", statErr)
+	}
+
+	raw, readErr := os.ReadFile(summaryPath)
+	if readErr != nil {
+		t.Fatalf("expected summary JSON to be written: %v", readErr)
+	}
+
+	var summary RunSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("invalid summary JSON: %v", err)
+	}
+
+	if summary.Status != "success" {
+		t.Fatalf("expected summary status success, got %q", summary.Status)
+	}
+	if len(summary.Stages) != 1 {
+		t.Fatalf("expected 1 stage summary, got %d", len(summary.Stages))
+	}
+	if summary.Stages[0].Status != "success" {
+		t.Fatalf("expected stage status success, got %q", summary.Stages[0].Status)
+	}
+	if summary.Stages[0].Attempts != 1 {
+		t.Fatalf("expected stage attempts 1 in dry-run, got %d", summary.Stages[0].Attempts)
+	}
+}
+
+func TestPreflightCommandsReturnsAllMissingCommands(t *testing.T) {
+	stages := []Stage{
+		{Name: "missing-a", Command: "pipeline-missing-cmd-abc123"},
+		{Name: "missing-b", Command: "pipeline-missing-cmd-abc123"},
+		{Name: "missing-c", Command: "pipeline-missing-cmd-def456"},
+	}
+
+	err := preflightCommands(stages)
+	if err == nil {
+		t.Fatal("preflightCommands() expected error for missing commands")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "pipeline-missing-cmd-abc123") || !strings.Contains(msg, "pipeline-missing-cmd-def456") {
+		t.Fatalf("expected both missing command names in error, got: %q", msg)
+	}
+	if !strings.Contains(msg, "missing-a") || !strings.Contains(msg, "missing-b") || !strings.Contains(msg, "missing-c") {
+		t.Fatalf("expected related stage names in error, got: %q", msg)
+	}
+}
+
+func TestRunFailsPreflightBeforeAnyStageExecutes(t *testing.T) {
+	requirePOSIXShell(t)
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "pipeline.yaml")
+	marker := filepath.Join(tempDir, "must-not-exist.marker")
+
+	config := fmt.Sprintf(`project: "preflight-fail"
+stages:
+  - name: "touch-marker"
+    command: "sh"
+    args: ["-c", "touch %s"]
+  - name: "missing-cmd"
+    command: "pipeline-missing-cmd-xyz999"
+`, marker)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	err := run(context.Background(), configPath, Options{Quiet: true})
+	if err == nil {
+		t.Fatal("run() expected preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "preflight failed") {
+		t.Fatalf("expected preflight error, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected marker not to be created when preflight fails; statErr=%v", statErr)
+	}
+}
+
+func TestRunSkipPreflightBypassesChecks(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "pipeline.yaml")
+
+	config := `project: "skip-preflight"
+stages:
+  - name: "missing-cmd"
+    command: "pipeline-missing-cmd-jkl123"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	err := run(context.Background(), configPath, Options{Quiet: true, SkipPreflight: true})
+	if err == nil {
+		t.Fatal("run() expected runtime command error, got nil")
+	}
+	if strings.Contains(err.Error(), "preflight failed") {
+		t.Fatalf("expected non-preflight error when SkipPreflight is enabled, got: %v", err)
 	}
 }

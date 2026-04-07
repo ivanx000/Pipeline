@@ -59,7 +59,19 @@ stages:
 gopipe --config pipeline.yaml
 ```
 
-5. Optional: save a machine-readable summary for tooling
+5. Preview without side effects (recommended first run)
+
+```bash
+gopipe --config pipeline.yaml --dry-run
+```
+
+6. Run preflight check + execute (preflight is enabled by default)
+
+```bash
+gopipe --config pipeline.yaml
+```
+
+7. Optional: save a machine-readable summary for tooling
 
 ```bash
 gopipe --config pipeline.yaml --summary-json .pipeline/last-run.json
@@ -91,6 +103,18 @@ Run only named stages:
 go run . --only "Lint,Unit Tests"
 ```
 
+Preview planned execution only:
+
+```bash
+go run . --dry-run
+```
+
+Bypass preflight command checks (advanced troubleshooting only):
+
+```bash
+go run . --skip-preflight
+```
+
 Override max parallelism from CLI:
 
 ```bash
@@ -120,6 +144,12 @@ go run . --quiet
 - `--max-parallel int`
   - Override config `max_parallel`
   - `0` means use config value
+- `--dry-run`
+  - Preview stage execution without running stage commands
+  - Useful for validating stage filters and ordering safely
+- `--skip-preflight`
+  - Skip command availability checks before execution
+  - Preflight checks are enabled by default
 - `--summary-json string`
   - Write a JSON run summary to file
 
@@ -226,6 +256,14 @@ Pipeline fails early when config is invalid, including:
 - Invalid/non-positive timeout values
 - Negative `max_parallel`
 - Invalid env keys (empty or containing `=`)
+
+## Preflight Checks
+
+Before running stages, Pipeline verifies that required stage commands are available.
+
+- Checks are enabled by default
+- Missing commands are reported together in one error
+- Use `--skip-preflight` only when intentionally bypassing this safeguard
 
 ## Use As A Go Package
 

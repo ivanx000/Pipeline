@@ -16,6 +16,8 @@ func main() {
 	only := flag.String("only", "", "Comma-separated list of stage names to run")
 	summaryJSON := flag.String("summary-json", "", "Write machine-readable run summary to this JSON file")
 	maxParallel := flag.Int("max-parallel", 0, "Override config max parallel stage count (0 uses config value)")
+	dryRun := flag.Bool("dry-run", false, "Preview planned execution without running stage commands")
+	skipPreflight := flag.Bool("skip-preflight", false, "Skip preflight command availability checks")
 	flag.Parse()
 
 	if *maxParallel < 0 {
@@ -31,6 +33,8 @@ func main() {
 		Only:            onlyStages,
 		SummaryJSONPath: strings.TrimSpace(*summaryJSON),
 		MaxParallel:     *maxParallel,
+		DryRun:          *dryRun,
+		SkipPreflight:   *skipPreflight,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR | %v\n", err)
 		os.Exit(1)
