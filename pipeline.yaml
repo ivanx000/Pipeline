@@ -1,4 +1,5 @@
 project: "My-Go-Pipeline"
+max_parallel: 2
 stages:
   - name: "Linting"
     command: "go"
@@ -8,7 +9,8 @@ stages:
     command: "go"
     args: ["test", "-race", "-v", "./..."]
     parallel: true
+    env:
+      GOFLAGS: "-mod=mod"
   - name: "Build Binary"
     command: "go"
     args: ["build", "-o", "gopipe", "."]
-    parallel: false

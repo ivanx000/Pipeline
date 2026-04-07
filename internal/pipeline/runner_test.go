@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func requirePOSIXShell(t *testing.T) {
@@ -27,9 +28,20 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				Project: "ok",
-				Stages:  []Stage{{Name: "build", Command: "go", Args: []string{"version"}}},
+				Project:     "ok",
+				MaxParallel: 2,
+				Stages: []Stage{{
+					Name:    "build",
+					Command: "go",
+					Args:    []string{"version"},
+					Env:     map[string]string{"GOFLAGS": "-mod=mod"},
+				}},
 			},
+		},
+		{
+			name:    "negative max parallel",
+			config:  Config{Project: "invalid", MaxParallel: -1, Stages: []Stage{{Name: "build", Command: "go"}}},
+			wantErr: "max_parallel has invalid value",
 		},
 		{
 			name:    "no stages",
@@ -78,6 +90,13 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: "non-positive timeout",
 		},
+		{
+			name: "invalid env key",
+			config: Config{
+				Stages: []Stage{{Name: "lint", Command: "echo", Env: map[string]string{"": "value"}}},
+			},
+			wantErr: "env entry with empty key",
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,7 +123,7 @@ func TestExecuteStageWithRetrySucceedsOnRetry(t *testing.T) {
 	flagFile := filepath.Join(t.TempDir(), "retry-once.flag")
 	script := fmt.Sprintf(`if [ ! -f %q ]; then touch %q; echo fail-first; exit 1; fi; echo pass-second`, flagFile, flagFile)
 
-	err := executeStageWithRetry(context.Background(), Stage{
+	_, err := executeStageWithRetry(context.Background(), Stage{
 		Name:    "retry-once",
 		Command: "sh",
 		Args:    []string{"-c", script},
@@ -122,7 +141,7 @@ func TestExecuteStageWithRetrySucceedsOnRetry(t *testing.T) {
 func TestExecuteStageWithRetryTimesOut(t *testing.T) {
 	requirePOSIXShell(t)
 
-	err := executeStageWithRetry(context.Background(), Stage{
+	_, err := executeStageWithRetry(context.Background(), Stage{
 		Name:    "timeout",
 		Command: "sh",
 		Args:    []string{"-c", "sleep 1"},
@@ -152,12 +171,89 @@ func TestRunPipelineStopsBeforeSequentialAfterParallelFailure(t *testing.T) {
 		{Name: "sequential-should-not-run", Command: "sh", Args: []string{"-c", fmt.Sprintf("touch %q", marker)}},
 	}
 
-	err := runPipeline(context.Background(), stages, Options{})
+	err := runPipeline(context.Background(), stages, 0, Options{}, nil)
 	if err == nil {
 		t.Fatal("runPipeline() expected error, got nil")
 	}
 
 	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected sequential stage not to run; marker state err=%v", statErr)
+	}
+}
+
+func TestExecuteStageWithWorkdirAndEnv(t *testing.T) {
+	requirePOSIXShell(t)
+
+	tempDir := t.TempDir()
+	errFile := filepath.Join(tempDir, "pwd.txt")
+
+	_, err := executeStageWithRetry(context.Background(), Stage{
+		Name:    "workdir-env",
+		Command: "sh",
+		Args:    []string{"-c", fmt.Sprintf("[ \"$PIPELINE_ENV_TEST\" = \"ok\" ] && pwd > %q", errFile)},
+		Workdir: tempDir,
+		Env: map[string]string{
+			"PIPELINE_ENV_TEST": "ok",
+		},
+	}, Options{Quiet: true})
+	if err != nil {
+		t.Fatalf("executeStageWithRetry() unexpected error: %v", err)
+	}
+
+	raw, readErr := os.ReadFile(errFile)
+	if readErr != nil {
+		t.Fatalf("expected pwd output file: %v", readErr)
+	}
+
+	got := strings.TrimSpace(string(raw))
+	resolvedTempDir, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		t.Fatalf("failed to resolve temp dir symlink: %v", err)
+	}
+	resolvedGot, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("failed to resolve pwd symlink: %v", err)
+	}
+	if resolvedGot != resolvedTempDir {
+		t.Fatalf("expected workdir %q, got %q", resolvedTempDir, resolvedGot)
+	}
+}
+
+func TestSelectStagesWithFromAndOnly(t *testing.T) {
+	stages := []Stage{
+		{Name: "lint", Command: "echo"},
+		{Name: "test", Command: "echo"},
+		{Name: "build", Command: "echo"},
+	}
+
+	selected, err := selectStages(stages, Options{From: "test", Only: []string{"build", "test"}})
+	if err != nil {
+		t.Fatalf("selectStages() unexpected error: %v", err)
+	}
+
+	if len(selected) != 2 {
+		t.Fatalf("expected 2 selected stages, got %d", len(selected))
+	}
+	if selected[0].Name != "test" || selected[1].Name != "build" {
+		t.Fatalf("unexpected selected stage order: %v, %v", selected[0].Name, selected[1].Name)
+	}
+}
+
+func TestRunPipelineWithMaxParallelOne(t *testing.T) {
+	requirePOSIXShell(t)
+
+	stages := []Stage{
+		{Name: "p1", Command: "sh", Args: []string{"-c", "sleep 0.2"}, Parallel: true},
+		{Name: "p2", Command: "sh", Args: []string{"-c", "sleep 0.2"}, Parallel: true},
+	}
+
+	start := time.Now()
+	err := runPipeline(context.Background(), stages, 1, Options{Quiet: true}, nil)
+	if err != nil {
+		t.Fatalf("runPipeline() unexpected error: %v", err)
+	}
+
+	if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
+		t.Fatalf("expected max_parallel=1 to serialize parallel stages, elapsed=%v", elapsed)
 	}
 }

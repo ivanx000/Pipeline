@@ -29,6 +29,10 @@ func loadConfig(configPath string) (Config, error) {
 }
 
 func validateConfig(config Config) error {
+	if config.MaxParallel < 0 {
+		return fmt.Errorf("max_parallel has invalid value %d; must be >= 0", config.MaxParallel)
+	}
+
 	if len(config.Stages) == 0 {
 		return errors.New("pipeline has no stages")
 	}
@@ -43,6 +47,14 @@ func validateConfig(config Config) error {
 		}
 		if stage.Retry < 0 {
 			return fmt.Errorf("stage %q has invalid retry value %d; must be >= 0", stage.Name, stage.Retry)
+		}
+		for key := range stage.Env {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("stage %q has env entry with empty key", stage.Name)
+			}
+			if strings.Contains(key, "=") {
+				return fmt.Errorf("stage %q has invalid env key %q; must not contain '='", stage.Name, key)
+			}
 		}
 		if stage.Timeout != "" {
 			timeout, err := time.ParseDuration(stage.Timeout)

@@ -1,238 +1,284 @@
 # Pipeline
 
-Pipeline is a lightweight CI/CD pipeline runner written in Go.
+Pipeline is a lightweight local CI runner written in Go.
 
-It reads a local YAML configuration file, executes stages as shell commands, and supports controlled parallel execution, retries, stage-level timeouts, and signal-aware cancellation.
+It executes YAML-defined stages with retries, timeouts, cancellation handling, scoped parallelism, stage filters, stage-level environment overrides, and JSON run summaries.
 
-The project is designed as a single-binary CLI with a clean internal package layout.
+## Why Use It
 
-## What It Does
+- Keep local automation simple and reproducible
+- Run the same checks before pushing code
+- Fail fast with clear logs
+- Keep config in version control
 
-- Loads pipeline configuration from YAML
-- Validates configuration before execution
-- Runs stages sequentially by default
-- Runs adjacent stages concurrently when `parallel: true`
-- Ensures sequential stages wait for active parallel batches
-- Fails fast on stage failure and cancels in-flight sibling stages
-- Supports retry and timeout per stage
-- Handles Ctrl+C / SIGTERM gracefully
-- Provides professional CLI logs with optional quiet mode
+## Quick Start For Local Projects
 
-## Key Features
+This section walks through setting up Pipeline in any local repository.
 
-- Simple config-first workflow
-- Strong execution guarantees around stage ordering
-- Idiomatic Go concurrency with cancellation propagation
-- Minimal dependencies
-- Easy to extend
-
-## Project Structure
-
-```text
-.
-|-- main.go                      # CLI entrypoint and flag parsing
-|-- pipeline.yaml                # Example pipeline config
-|-- internal/
-|   `-- pipeline/
-|       |-- types.go             # Config and stage models
-|       |-- config.go            # YAML load and validation
-|       |-- runner.go            # Orchestration, retries, timeouts, logging
-|       `-- runner_test.go       # Unit and behavior tests
-|-- go.mod
-`-- go.sum
-```
-
-## Requirements
-
-- Go 1.26.1 or newer (project currently targets 1.26.1)
-
-## Build
+1. Build the CLI once
 
 ```bash
+git clone https://github.com/ivanx000/Pipeline.git
+cd Pipeline
 go build -o gopipe .
 ```
 
-## Run
+2. Copy `gopipe` somewhere on your PATH or invoke it with an absolute path
 
-Default config path:
+```bash
+mv gopipe /usr/local/bin/gopipe
+```
+
+3. In your target project, create `pipeline.yaml`
+
+```yaml
+project: "my-local-project"
+max_parallel: 2
+
+stages:
+  - name: "Lint"
+    command: "go"
+    args: ["vet", "./..."]
+    parallel: true
+
+  - name: "Unit Tests"
+    command: "go"
+    args: ["test", "./..."]
+    parallel: true
+    timeout: "2m"
+    retry: 1
+
+  - name: "Build"
+    command: "go"
+    args: ["build", "./..."]
+```
+
+4. Run Pipeline from the project root
+
+```bash
+gopipe --config pipeline.yaml
+```
+
+5. Optional: save a machine-readable summary for tooling
+
+```bash
+gopipe --config pipeline.yaml --summary-json .pipeline/last-run.json
+```
+
+## CLI Usage
+
+Run with defaults:
 
 ```bash
 go run .
 ```
 
-Custom config path:
+Run against a custom config:
 
 ```bash
-go run . --config pipeline.yaml
+go run . --config path/to/pipeline.yaml
 ```
 
-Quiet mode (suppresses Pipeline info logs, keeps warnings/errors):
+Run a subset from a stage onward:
 
 ```bash
-go run . --config pipeline.yaml --quiet
+go run . --from "Unit Tests"
 ```
 
-Built binary:
+Run only named stages:
 
 ```bash
-./gopipe --config pipeline.yaml
+go run . --only "Lint,Unit Tests"
+```
+
+Override max parallelism from CLI:
+
+```bash
+go run . --max-parallel 1
+```
+
+Quiet mode:
+
+```bash
+go run . --quiet
 ```
 
 ## CLI Flags
 
 - `--config string`
-  - Path to pipeline configuration file
+  - Path to config file
   - Default: `pipeline.yaml`
 - `--quiet`
-  - Suppress informational Pipeline logs
-  - Warnings and errors still print
-  - Stage command output is still streamed
+  - Suppress Pipeline `INFO` logs
+  - Keep `WARN` and `ERROR` logs
+  - Keep subprocess stdout/stderr streaming
+- `--from string`
+  - Start execution from the named stage (inclusive)
+- `--only string`
+  - Comma-separated stage names to run
+  - Preserves original stage order
+- `--max-parallel int`
+  - Override config `max_parallel`
+  - `0` means use config value
+- `--summary-json string`
+  - Write a JSON run summary to file
 
-## Configuration File
+## Configuration Reference
 
-Pipeline reads a YAML document with this structure:
+Top-level fields:
+
+- `project` (string): Display name for the run
+- `max_parallel` (int, optional): Max concurrent stages inside each adjacent parallel batch. `0` means unlimited
+- `stages` (array): Ordered stage list
+
+Stage fields:
+
+- `name` (string, required): Unique stage name
+- `command` (string, required): Executable to run
+- `args` (array of strings, optional): Command arguments
+- `parallel` (bool, optional): If true, can run in the current parallel batch
+- `timeout` (duration string, optional): Per-attempt timeout (for example `500ms`, `30s`, `2m`)
+- `retry` (int, optional): Retries after first failure
+- `workdir` (string, optional): Working directory for command execution
+- `env` (map of string to string, optional): Environment variable overrides for that stage
+
+## Full Example
 
 ```yaml
-project: "My-Go-Pipeline"
+project: "polyglot-monorepo"
+max_parallel: 2
+
 stages:
-  - name: "Linting"
+  - name: "Go Lint"
     command: "go"
     args: ["vet", "./..."]
     parallel: true
-    timeout: "30s"
+
+  - name: "Frontend Lint"
+    command: "npm"
+    args: ["run", "lint"]
+    workdir: "web"
+    env:
+      NODE_ENV: "test"
+    parallel: true
+
+  - name: "Go Tests"
+    command: "go"
+    args: ["test", "./..."]
+    timeout: "3m"
     retry: 1
+
+  - name: "Build Web"
+    command: "npm"
+    args: ["run", "build"]
+    workdir: "web"
 ```
-
-### Top-level fields
-
-- `project` (string): Display name for the run
-- `stages` (array): Ordered list of stages to execute
-
-### Stage fields
-
-- `name` (string, required): Human-readable stage name
-- `command` (string, required): Executable to run
-- `args` (string array, optional): Command arguments
-- `parallel` (bool, optional): If true, stage may run with adjacent parallel stages
-- `timeout` (duration string, optional): Per-attempt timeout (Go duration format, for example `500ms`, `30s`, `2m`)
-- `retry` (int, optional): Number of retries after first failed attempt (`retry: 2` means 3 total attempts)
 
 ## Execution Model
 
-Pipeline processes stages in definition order.
+- Stages are evaluated in file order
+- Adjacent `parallel: true` stages form one parallel batch
+- Sequential stages wait until the active parallel batch completes
+- Any non-cancelled failure in a parallel batch cancels sibling stages (fail-fast)
+- Retries are per stage attempt
+- Timeout applies per attempt
 
-- Sequential stages (`parallel: false` or omitted)
-  - Run one at a time
-- Parallel batches (`parallel: true`)
-  - Consecutive parallel stages form a batch
-  - Stages in the batch run concurrently
+## JSON Summary Output
 
-Barrier behavior:
+When `--summary-json` is provided, Pipeline writes a file like:
 
-- A sequential stage will not start until all currently running parallel stages are finished (or canceled)
-- Final completion waits for any remaining parallel batch
+```json
+{
+  "project": "my-local-project",
+  "config_path": "pipeline.yaml",
+  "status": "success",
+  "started_at": "2026-04-07T10:00:00Z",
+  "finished_at": "2026-04-07T10:00:03Z",
+  "duration_ms": 3000,
+  "max_parallel": 2,
+  "stage_count": 3,
+  "stages": [
+    {
+      "name": "Lint",
+      "command": "go vet ./...",
+      "status": "success",
+      "attempts": 1,
+      "duration_ms": 420
+    }
+  ]
+}
+```
 
-Failure behavior:
+Per-stage status values are:
 
-- If one stage in a parallel batch fails, sibling stages are canceled (fail-fast)
-- The pipeline exits with a non-zero status
+- `success`
+- `failed`
+- `cancelled`
 
 ## Validation Rules
 
-Before execution, Pipeline validates config and fails early on:
+Pipeline fails early when config is invalid, including:
 
-- No stages provided
-- Missing stage name
-- Missing command
+- Missing stages
+- Missing stage name or command
 - Duplicate stage names
 - Negative retry values
-- Invalid timeout format
-- Non-positive timeout values
+- Invalid/non-positive timeout values
+- Negative `max_parallel`
+- Invalid env keys (empty or containing `=`)
 
-## Logging Behavior
+## Use As A Go Package
 
-Pipeline uses structured console prefixes:
+If you want to embed Pipeline in a Go app, import:
 
-- `INFO  | ...`
-- `WARN  | ...`
-- `ERROR | ...`
-
-When `--quiet` is enabled:
-
-- Pipeline `INFO` logs are suppressed
-- `WARN` and `ERROR` logs remain
-- Subprocess stdout/stderr still streams
-
-## Retries and Timeouts
-
-Retries are attempt-based and timeout applies per attempt.
-
-Example:
-
-```yaml
-- name: "Flaky API Check"
-  command: "sh"
-  args: ["-c", "./scripts/check-api.sh"]
-  retry: 2
-  timeout: "10s"
+```go
+import "github.com/ivanx000/Pipeline/pkg/pipeline"
 ```
 
-Behavior:
+And execute:
 
-- Attempt 1 runs with a 10s timeout
-- On failure, stage is retried up to 2 additional times
-- If all attempts fail, pipeline fails
+```go
+err := pipeline.RunWithOptions("pipeline.yaml", pipeline.Options{
+    Quiet:           false,
+    From:            "Lint",
+    Only:            []string{"Lint", "Unit Tests"},
+    MaxParallel:     2,
+    SummaryJSONPath: "run-summary.json",
+})
+```
 
-## Signal Handling
+## Local Development
 
-Pipeline listens for interrupt/termination signals and propagates cancellation through context.
-
-- Ctrl+C cancels running stages
-- Active commands are terminated via context-aware execution
-
-## Testing
-
-Run all tests:
+Run tests:
 
 ```bash
 go test ./...
 ```
 
-Run with race detector:
+Run race detector:
 
 ```bash
 go test -race ./...
 ```
 
-## Example pipeline.yaml
+## Project Layout
 
-The repository includes a working example in `pipeline.yaml`:
-
-- Linting and Security Check run in parallel
-- Build Binary runs only after parallel stages complete
-
-## Typical Workflow
-
-1. Edit `pipeline.yaml`
-2. Run `go run . --config pipeline.yaml`
-3. Iterate on stages as needed
-4. Build binary with `go build -o gopipe .` for local distribution
-
-## Extensibility Notes
-
-The internal package layout is intentionally split for maintainability:
-
-- `types.go` for models
-- `config.go` for parsing and validation
-- `runner.go` for orchestration and runtime behavior
-
-This makes future features straightforward, such as:
-
-- Stage dependencies (`depends_on`)
-- Conditional execution
-- Environment variable injection per stage
-- Artifact or output capture
-- Alternative executors
+```text
+.
+|-- main.go
+|-- pipeline.yaml
+|-- pkg/
+|   `-- pipeline/
+|       `-- pipeline.go
+|-- internal/
+|   `-- pipeline/
+|       |-- types.go
+|       |-- config.go
+|       |-- runner.go
+|       `-- runner_test.go
+|-- go.mod
+`-- go.sum
+```
 
 ## License
 
