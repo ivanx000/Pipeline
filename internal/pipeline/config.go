@@ -33,6 +33,15 @@ func validateConfig(config Config) error {
 		return fmt.Errorf("max_parallel has invalid value %d; must be >= 0", config.MaxParallel)
 	}
 
+	for key := range config.Env {
+		if strings.TrimSpace(key) == "" {
+			return errors.New("pipeline env has entry with empty key")
+		}
+		if strings.Contains(key, "=") {
+			return fmt.Errorf("pipeline env has invalid key %q; must not contain '='", key)
+		}
+	}
+
 	if len(config.Stages) == 0 {
 		return errors.New("pipeline has no stages")
 	}
@@ -42,8 +51,13 @@ func validateConfig(config Config) error {
 		if strings.TrimSpace(stage.Name) == "" {
 			return fmt.Errorf("stage at index %d is missing name", i)
 		}
-		if strings.TrimSpace(stage.Command) == "" {
-			return fmt.Errorf("stage %q is missing command", stage.Name)
+		hasCommand := strings.TrimSpace(stage.Command) != ""
+		hasRun := strings.TrimSpace(stage.Run) != ""
+		if hasCommand && hasRun {
+			return fmt.Errorf("stage %q has both 'command' and 'run'; use one or the other", stage.Name)
+		}
+		if !hasCommand && !hasRun {
+			return fmt.Errorf("stage %q must have either 'command' or 'run'", stage.Name)
 		}
 		if stage.Retry < 0 {
 			return fmt.Errorf("stage %q has invalid retry value %d; must be >= 0", stage.Name, stage.Retry)
@@ -63,6 +77,15 @@ func validateConfig(config Config) error {
 			}
 			if timeout <= 0 {
 				return fmt.Errorf("stage %q has non-positive timeout %q", stage.Name, stage.Timeout)
+			}
+		}
+		if stage.RetryDelay != "" {
+			delay, err := time.ParseDuration(stage.RetryDelay)
+			if err != nil {
+				return fmt.Errorf("stage %q has invalid retry_delay %q: %w", stage.Name, stage.RetryDelay, err)
+			}
+			if delay <= 0 {
+				return fmt.Errorf("stage %q has non-positive retry_delay %q", stage.Name, stage.RetryDelay)
 			}
 		}
 		if _, exists := names[stage.Name]; exists {

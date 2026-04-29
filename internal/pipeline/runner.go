@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,6 +34,8 @@ type Options struct {
 	MaxParallel     int
 	DryRun          bool
 	SkipPreflight   bool
+	Stdout          io.Writer // subprocess stdout; defaults to os.Stdout when nil
+	Stderr          io.Writer // subprocess stderr; defaults to os.Stderr when nil
 }
 
 // StageSummary stores one stage execution result for JSON reporting.
@@ -161,7 +164,7 @@ func run(ctx context.Context, configPath string, options Options) error {
 	if !options.Quiet {
 		fmt.Println(strings.Repeat("=", 40))
 	}
-	err = runPipeline(ctx, stages, maxParallel, options, recorder)
+	err = runPipeline(ctx, stages, maxParallel, options, recorder, config.Env)
 	recorder.finish(err)
 	if err != nil {
 		return err
@@ -174,7 +177,7 @@ func run(ctx context.Context, configPath string, options Options) error {
 	return nil
 }
 
-func runPipeline(ctx context.Context, stages []Stage, maxParallel int, options Options, recorder *summaryRecorder) error {
+func runPipeline(ctx context.Context, stages []Stage, maxParallel int, options Options, recorder *summaryRecorder, pipelineEnv map[string]string) error {
 	var parallelBatch []Stage
 
 	flushParallelBatch := func() error {
@@ -182,7 +185,7 @@ func runPipeline(ctx context.Context, stages []Stage, maxParallel int, options O
 			return nil
 		}
 
-		err := runParallelBatch(ctx, parallelBatch, maxParallel, options, recorder)
+		err := runParallelBatch(ctx, parallelBatch, maxParallel, options, recorder, pipelineEnv)
 		parallelBatch = nil
 		return err
 	}
@@ -199,7 +202,7 @@ func runPipeline(ctx context.Context, stages []Stage, maxParallel int, options O
 				return err
 			}
 
-			if err := executeStageWithRetryTracked(ctx, stage, options, recorder); err != nil {
+			if err := executeStageWithRetryTracked(ctx, stage, options, recorder, pipelineEnv); err != nil {
 				return err
 			}
 		}
@@ -212,7 +215,7 @@ func runPipeline(ctx context.Context, stages []Stage, maxParallel int, options O
 	return nil
 }
 
-func runParallelBatch(parentCtx context.Context, stages []Stage, maxParallel int, options Options, recorder *summaryRecorder) error {
+func runParallelBatch(parentCtx context.Context, stages []Stage, maxParallel int, options Options, recorder *summaryRecorder, pipelineEnv map[string]string) error {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -238,7 +241,7 @@ func runParallelBatch(parentCtx context.Context, stages []Stage, maxParallel int
 				case <-ctx.Done():
 					resultCh <- stageResult{err: &stageError{
 						Stage:     s.Name,
-						Command:   s.Command,
+						Command:   stageCommandLabel(s),
 						Err:       ctx.Err(),
 						Cancelled: true,
 					}}
@@ -251,14 +254,14 @@ func runParallelBatch(parentCtx context.Context, stages []Stage, maxParallel int
 				if r := recover(); r != nil {
 					resultCh <- stageResult{err: &stageError{
 						Stage:   s.Name,
-						Command: s.Command,
+						Command: stageCommandLabel(s),
 						Err:     fmt.Errorf("panic: %v", r),
 					}}
 					cancel()
 				}
 			}()
 
-			err := executeStageWithRetryTracked(ctx, s, options, recorder)
+			err := executeStageWithRetryTracked(ctx, s, options, recorder, pipelineEnv)
 			if err != nil {
 				cancel()
 			}
@@ -290,28 +293,36 @@ func runParallelBatch(parentCtx context.Context, stages []Stage, maxParallel int
 	return firstErr
 }
 
-func executeStageWithRetryTracked(ctx context.Context, s Stage, options Options, recorder *summaryRecorder) error {
+func executeStageWithRetryTracked(ctx context.Context, s Stage, options Options, recorder *summaryRecorder, pipelineEnv map[string]string) error {
 	started := time.Now()
-	attempts, err := executeStageWithRetry(ctx, s, options)
+	attempts, err := executeStageWithRetry(ctx, s, options, pipelineEnv)
 	if recorder != nil {
 		recorder.addStage(StageSummary{
 			Name:       s.Name,
-			Command:    strings.TrimSpace(strings.Join(append([]string{s.Command}, s.Args...), " ")),
+			Command:    stageCommandLabel(s),
 			Status:     stageStatus(err),
 			Attempts:   attempts,
 			DurationMS: time.Since(started).Milliseconds(),
 			Error:      errorMessage(err),
 		})
 	}
+	if err != nil && s.ContinueOnError {
+		var sErr *stageError
+		if errors.As(err, &sErr) && sErr.Cancelled {
+			return err // never swallow a cancellation
+		}
+		warn.Printf("WARN  | Stage %q failed but continue_on_error is set; continuing.\n", s.Name)
+		return nil
+	}
 	return err
 }
 
-func executeStageWithRetry(ctx context.Context, s Stage, options Options) (int, error) {
+func executeStageWithRetry(ctx context.Context, s Stage, options Options, pipelineEnv map[string]string) (int, error) {
 	attempts := s.Retry + 1
 	var lastErr error
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err := executeStage(ctx, s, attempt, attempts, options)
+		err := executeStage(ctx, s, attempt, attempts, options, pipelineEnv)
 		if err == nil {
 			return attempt, nil
 		}
@@ -330,10 +341,16 @@ func executeStageWithRetry(ctx context.Context, s Stage, options Options) (int, 
 		}
 
 		warn.Printf("WARN  | Retrying stage %q (attempt %d/%d)\n", s.Name, attempt+1, attempts)
-		if err := sleepWithContext(ctx, time.Second); err != nil {
+		retryDelay := time.Second
+		if s.RetryDelay != "" {
+			if d, parseErr := time.ParseDuration(s.RetryDelay); parseErr == nil {
+				retryDelay = d
+			}
+		}
+		if err := sleepWithContext(ctx, retryDelay); err != nil {
 			return attempt, &stageError{
 				Stage:     s.Name,
-				Command:   s.Command,
+				Command:   stageCommandLabel(s),
 				Err:       err,
 				Cancelled: true,
 			}
@@ -356,14 +373,18 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 // executeStage handles one stage attempt.
-func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, options Options) error {
+func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, options Options, pipelineEnv map[string]string) error {
 	runLabel := s.Name
 	if totalAttempts > 1 {
 		runLabel = fmt.Sprintf("%s (attempt %d/%d)", s.Name, attempt, totalAttempts)
 	}
 
 	printInfo(options, "\nINFO  | Running stage: %s\n", runLabel)
-	printInfo(options, "INFO  | Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+	if s.Run != "" {
+		printInfo(options, "INFO  | Run: %s\n", s.Run)
+	} else {
+		printInfo(options, "INFO  | Command: %s %s\n", s.Command, strings.Join(s.Args, " "))
+	}
 	if s.Workdir != "" {
 		printInfo(options, "INFO  | Workdir: %s\n", s.Workdir)
 	}
@@ -379,18 +400,23 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, 
 	if s.Timeout != "" {
 		timeout, err := time.ParseDuration(s.Timeout)
 		if err != nil {
-			return &stageError{Stage: s.Name, Command: s.Command, Err: err}
+			return &stageError{Stage: s.Name, Command: stageCommandLabel(s), Err: err}
 		}
 		runCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, s.Command, s.Args...)
+	var cmd *exec.Cmd
+	if s.Run != "" {
+		cmd = exec.CommandContext(runCtx, "sh", "-c", s.Run)
+	} else {
+		cmd = exec.CommandContext(runCtx, s.Command, s.Args...)
+	}
 	if s.Workdir != "" {
 		cmd.Dir = s.Workdir
 	}
-	if len(s.Env) > 0 {
-		cmd.Env = mergedEnv(os.Environ(), s.Env)
+	if len(pipelineEnv) > 0 || len(s.Env) > 0 {
+		cmd.Env = mergedEnv(os.Environ(), pipelineEnv, s.Env)
 	}
 
 	if options.DryRun {
@@ -399,14 +425,14 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, 
 		return nil
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdoutWriter(options)
+	cmd.Stderr = stderrWriter(options)
 
 	if err := cmd.Run(); err != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return &stageError{
 				Stage:   s.Name,
-				Command: s.Command,
+				Command: stageCommandLabel(s),
 				Err:     fmt.Errorf("timed out after %s", s.Timeout),
 			}
 		}
@@ -414,7 +440,7 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, 
 		if ctx.Err() != nil {
 			return &stageError{
 				Stage:     s.Name,
-				Command:   s.Command,
+				Command:   stageCommandLabel(s),
 				Err:       ctx.Err(),
 				Cancelled: true,
 			}
@@ -422,7 +448,7 @@ func executeStage(ctx context.Context, s Stage, attempt int, totalAttempts int, 
 
 		return &stageError{
 			Stage:   s.Name,
-			Command: s.Command,
+			Command: stageCommandLabel(s),
 			Err:     err,
 		}
 	}
@@ -478,8 +504,8 @@ func selectStages(stages []Stage, options Options) ([]Stage, error) {
 	return selected, nil
 }
 
-func mergedEnv(base []string, overrides map[string]string) []string {
-	values := make(map[string]string, len(base)+len(overrides))
+func mergedEnv(base []string, pipelineEnv map[string]string, stageEnv map[string]string) []string {
+	values := make(map[string]string, len(base)+len(pipelineEnv)+len(stageEnv))
 	for _, entry := range base {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
@@ -487,7 +513,10 @@ func mergedEnv(base []string, overrides map[string]string) []string {
 		}
 		values[key] = value
 	}
-	for key, value := range overrides {
+	for key, value := range pipelineEnv {
+		values[key] = value
+	}
+	for key, value := range stageEnv {
 		values[key] = value
 	}
 
@@ -502,6 +531,13 @@ func mergedEnv(base []string, overrides map[string]string) []string {
 		env = append(env, fmt.Sprintf("%s=%s", key, values[key]))
 	}
 	return env
+}
+
+func stageCommandLabel(s Stage) string {
+	if s.Run != "" {
+		return fmt.Sprintf("sh -c %q", s.Run)
+	}
+	return strings.TrimSpace(strings.Join(append([]string{s.Command}, s.Args...), " "))
 }
 
 func stageStatus(err error) string {
@@ -548,7 +584,12 @@ func preflightCommands(stages []Stage) error {
 	missingByCommand := make(map[string][]string)
 
 	for _, stage := range stages {
-		command := strings.TrimSpace(stage.Command)
+		var command string
+		if stage.Run != "" {
+			command = "sh"
+		} else {
+			command = strings.TrimSpace(stage.Command)
+		}
 		if command == "" {
 			continue
 		}
@@ -596,6 +637,20 @@ func dedupeAndSort(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func stdoutWriter(opts Options) io.Writer {
+	if opts.Stdout != nil {
+		return opts.Stdout
+	}
+	return os.Stdout
+}
+
+func stderrWriter(opts Options) io.Writer {
+	if opts.Stderr != nil {
+		return opts.Stderr
+	}
+	return os.Stderr
 }
 
 func printInfo(options Options, format string, args ...any) {

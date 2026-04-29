@@ -1,16 +1,18 @@
 project: "My-Go-Pipeline"
 max_parallel: 2
+env:
+  GO_ENV: "test"
 stages:
   - name: "Linting"
-    command: "go"
-    args: ["vet", "./..."]
+    run: "go vet ./..."
     parallel: true
+
   - name: "Security Check"
-    command: "go"
-    args: ["test", "-race", "-v", "./..."]
+    run: "go test -race -v ./..."
     parallel: true
-    env:
-      GOFLAGS: "-mod=mod"
+    retry: 1
+    retry_delay: "2s"
+
   - name: "Build Binary"
     command: "go"
     args: ["build", "-o", "gopipe", "."]
